@@ -108,14 +108,15 @@ io.on('connection', (socket) => {
 
   // Handle a user joining a session
   socket.on('join-session', ({ sessionId, isTeacher, username, usn, password }) => {
+    console.log(`Received join-session: sessionId=${sessionId}, isTeacher=${isTeacher}, username=${username}, usn=${usn}`);
+
     // Authenticate user before allowing to join session
     const authenticateUser = isTeacher ? authenticateTeacher : authenticateStudent;
     const authIdentifier = isTeacher ? username : usn; // Use username for teacher, USN for student
 
-    
-    console.log(`username: ` , username , `usn: ` , usn)
     authenticateUser(authIdentifier, password, (err, user) => {
       if (err || !user) {
+        console.log(`Authentication failed for ${authIdentifier}:`, err);
         socket.emit('auth-failed', { message: 'Authentication failed. Invalid credentials or user not found.' });
         return;
       }
@@ -123,27 +124,29 @@ io.on('connection', (socket) => {
       socket.join(sessionId);
       if (!sessions[sessionId]) {
         sessions[sessionId] = { teacher: null, students: [], participants: {} };
+        attendance[sessionId] = []; // Ensure attendance is initialized for new sessions
       }
 
       // Check for unique USN enforcement for students
       if (!isTeacher) {
         // This check ensures a student with a given USN can only join once per session
         const usnAlreadyInSession = Object.values(sessions[sessionId].participants)
-          .some(p => p.usn === usn && p.isTeacher === false);
+          .some(p => p.usn === user.usn && p.isTeacher === false);
         if (usnAlreadyInSession) {
-          socket.emit('join-failed', { message: 'Student with this USN is already in the session.' });
+          socket.emit('join-failed', { message: `Student with USN ${user.usn} is already in the session.` });
           socket.leave(sessionId);
           return;
         }
       }
 
       // Add participant details to the session (using authenticated user's data)
-      sessions[sessionId].participants[socket.id] = { username: user.username, usn: user.usn, isTeacher };
+      sessions[sessionId].participants[socket.id] = { username: user.username, usn: user.usn || 'N/A', isTeacher };
 
       if (isTeacher) {
         sessions[sessionId].teacher = socket.id;
         console.log(`Teacher ${user.username} (${socket.id}) joined session ${sessionId}`);
         socket.emit('session-created', sessionId); // Emit the session ID to the teacher
+
         // Notify all current students in the session about the teacher
         Object.keys(sessions[sessionId].participants).forEach(participantId => {
           if (participantId !== socket.id && !sessions[sessionId].participants[participantId].isTeacher) {
@@ -151,11 +154,10 @@ io.on('connection', (socket) => {
           }
         });
 
-      } else {
+      } else { // It's a student
         sessions[sessionId].students.push(socket.id);
         console.log(`Student ${user.username} (${user.usn}, ${socket.id}) joined session ${sessionId}`);
         const joinTime = new Date().toISOString();
-        if (!attendance[sessionId]) attendance[sessionId] = [];
         attendance[sessionId].push({ studentId: socket.id, username: user.username, usn: user.usn, joinTime });
         console.log(`Attendance recorded for student ${user.username} in session ${sessionId} at ${joinTime}`);
 
@@ -163,14 +165,14 @@ io.on('connection', (socket) => {
         if (sessions[sessionId].teacher) {
           io.to(sessions[sessionId].teacher).emit('student-joined', { studentSocketId: socket.id, studentName: user.username, studentUsn: user.usn });
         }
-        // Notify the joining student about existing participants
+        // Notify the joining student about existing participants (including other students)
         Object.entries(sessions[sessionId].participants).forEach(([participantId, participant]) => {
           if (participantId !== socket.id) {
-            if (participant.isTeacher) {
-              io.to(socket.id).emit('teacher-joined', { teacherSocketId: participantId, teacherName: participant.username });
-            } else { // It's another student
-              io.to(socket.id).emit('student-joined', { studentSocketId: participantId, studentName: participant.username, studentUsn: participant.usn });
-            }
+            io.to(socket.id).emit(participant.isTeacher ? 'teacher-joined' : 'student-joined', {
+              [`${participant.isTeacher ? 'teacher' : 'student'}SocketId`]: participantId,
+              [`${participant.isTeacher ? 'teacher' : 'student'}Name`]: participant.username,
+              ...(participant.usn && { [`${'student'}Usn`]: participant.usn })
+            });
           }
         });
       }
@@ -211,7 +213,7 @@ io.on('connection', (socket) => {
   socket.on('send-question', ({ sessionId, question, studentId }) => {
     // Forward the question to the teacher in the session
     if (sessions[sessionId] && sessions[sessionId].teacher) {
-      io.to(sessions[sessionId].teacher).emit('new-question', { question, studentId });
+      io.to(sessions[sessionId].teacher).emit('new-question', { question, studentId, studentName: sessions[sessionId].participants[studentId]?.username || 'Anonymous' });
       console.log(`Question from ${studentId} in session ${sessionId}: ${question}`);
     }
   });
@@ -221,14 +223,17 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     console.log(`User disconnected: ${socket.id}`);
     for (const sessionId in sessions) {
-      if (sessions[sessionId] && sessions[sessionId].teacher === socket.id) {
+      if (!sessions[sessionId]) continue; // Ensure session exists
+
+      if (sessions[sessionId].teacher === socket.id) {
         console.log(`Teacher ${socket.id} left session ${sessionId}. Ending session.`);
         io.to(sessionId).emit('session-ended', sessionId);
         delete sessions[sessionId];
         delete attendance[sessionId];
         break;
       }
-      const studentIndex = sessions[sessionId] && sessions[sessionId].students.indexOf(socket.id);
+
+      const studentIndex = sessions[sessionId].students.indexOf(socket.id);
       if (studentIndex > -1) {
         sessions[sessionId].students.splice(studentIndex, 1);
         delete sessions[sessionId].participants[socket.id]; // Remove from participants
