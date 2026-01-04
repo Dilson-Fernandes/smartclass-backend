@@ -112,6 +112,7 @@ io.on('connection', (socket) => {
     const authenticateUser = isTeacher ? authenticateTeacher : authenticateStudent;
     const authIdentifier = isTeacher ? username : usn; // Use username for teacher, USN for student
 
+    
     console.log(`username: ` , username , `usn: ` , usn)
     authenticateUser(authIdentifier, password, (err, user) => {
       if (err || !user) {
