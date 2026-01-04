@@ -10,13 +10,14 @@ app.use(express.json()); // Enable JSON body parsing for Express
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: "http://localhost:3000", // Allow requests from our React app
+    origin: true, // Allow requests from our React app
     methods: ["GET", "POST"]
   }
 });
 
 const sessions = {}; // Stores active sessions and their participants
 const attendance = {}; // Stores attendance records for each session
+const offerSent = {};
 
 const PORT = process.env.PORT || 5000;
 
@@ -142,18 +143,26 @@ io.on('connection', (socket) => {
       // Add participant details to the session (using authenticated user's data)
       sessions[sessionId].participants[socket.id] = { username: user.username, usn: user.usn || 'N/A', isTeacher };
 
-      if (isTeacher) {
+      if (isTeacher && !sessions[sessionId].teacher) {
         sessions[sessionId].teacher = socket.id;
+      
         console.log(`Teacher ${user.username} (${socket.id}) joined session ${sessionId}`);
-        socket.emit('session-created', sessionId); // Emit the session ID to the teacher
-
-        // Notify all current students in the session about the teacher
+      
+        // Emit session-created ONLY ONCE
+        socket.emit('session-created', sessionId);
+      
+        // Notify students that teacher joined
         Object.keys(sessions[sessionId].participants).forEach(participantId => {
-          if (participantId !== socket.id && !sessions[sessionId].participants[participantId].isTeacher) {
-            io.to(participantId).emit('teacher-joined', { teacherSocketId: socket.id, teacherName: user.username });
+          if (
+            participantId !== socket.id &&
+            !sessions[sessionId].participants[participantId].isTeacher
+          ) {
+            io.to(participantId).emit('teacher-joined', {
+              teacherSocketId: socket.id,
+              teacherName: user.username
+            });
           }
         });
-
       } else { // It's a student
         sessions[sessionId].students.push(socket.id);
         console.log(`Student ${user.username} (${user.usn}, ${socket.id}) joined session ${sessionId}`);
@@ -184,8 +193,9 @@ io.on('connection', (socket) => {
   });
 
   // Handle WebRTC offer
-  socket.on('offer', ({ offer, targetSocketId, sessionId }) => {
-    io.to(targetSocketId).emit('offer', { offer, senderSocketId: socket.id, sessionId });
+  socket.on('offer', ({ offer, targetSocketId }) => {
+    offerSent[targetSocketId] = true;
+    io.to(targetSocketId).emit('offer', { offer, senderSocketId: socket.id });
   });
 
   // Handle WebRTC answer
@@ -194,8 +204,12 @@ io.on('connection', (socket) => {
   });
 
   // Handle ICE candidates
-  socket.on('candidate', ({ candidate, targetSocketId, sessionId }) => {
-    io.to(targetSocketId).emit('candidate', { candidate, senderSocketId: socket.id, sessionId });
+  socket.on('candidate', ({ candidate, targetSocketId }) => {
+    if (!offerSent[targetSocketId]) return;
+    io.to(targetSocketId).emit('candidate', {
+      candidate,
+      senderSocketId: socket.id
+    });
   });
 
   // Handle public and private messages
