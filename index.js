@@ -98,9 +98,33 @@ app.get('/download-attendance/:sessionId', (req, res) => {
     return res.status(404).json({ message: 'No attendance data found for this session.' });
   }
 
-  res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Content-Disposition', `attachment; filename=attendance_session_${sessionId}.json`);
-  res.send(JSON.stringify(sessionAttendance, null, 2));
+  // ❌ Fields to exclude
+  const excludedFields = ['studentId'];
+
+  // ✅ Get headers excluding studentId
+  const headers = Object.keys(sessionAttendance[0])
+    .filter(key => !excludedFields.includes(key))
+    .join(',');
+
+  // ✅ Build CSV rows excluding studentId
+  const rows = sessionAttendance.map(record =>
+    Object.keys(record)
+      .filter(key => !excludedFields.includes(key))
+      .map(key =>
+        `"${String(record[key]).replace(/"/g, '""')}"`
+      )
+      .join(',')
+  );
+
+  const csvData = [headers, ...rows].join('\n');
+
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename=attendance_session_${sessionId}.csv`
+  );
+
+  res.send(csvData);
 });
 
 
@@ -217,7 +241,7 @@ io.on('connection', (socket) => {
     if (isPrivate && targetId) {
       io.to(targetId).emit('new-message', { senderId, message, isPrivate: true, targetId, senderName });
       io.to(senderId).emit('new-message', { senderId, message, isPrivate: true, targetId, senderName }); // Send back to sender for their own display
-    } else {
+    }else {
       io.to(sessionId).emit('new-message', { senderId, message, isPrivate: false, senderName });
     }
   });
